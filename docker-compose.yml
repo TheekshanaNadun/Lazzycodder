@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  ai-agent:
+    build: .
+    volumes:
+      - ./output:/app/output
+    ports:
+      - "7860:7860"
+    environment:
+      - KLUSTER_API_KEY=your-api-key-here
+    deploy:
+      resources:
+        limits:
+          memory: 8g

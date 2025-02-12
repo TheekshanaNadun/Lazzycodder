@@ -1,0 +1,10 @@
+gradio==4.14.0
+httpx==0.27.2  # Critical version for proxy compatibility
+openai>=1.56.1  # Version with proxy handling fixes
+docker==7.0.0
+python-dotenv==1.0.0
+pandas==2.1.4
+matplotlib==3.8.2
+yfinance==0.2.36
+importlib-metadata==7.0.0
+setuptools==68.2.2
