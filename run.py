@@ -1,63 +1,48 @@
 import gradio as gr
-from openai import OpenAI
+import autogen
+from autogen import AssistantAgent, UserProxyAgent
 import os
 import re
 import subprocess
 import sys
 import ast
 from datetime import datetime
-import pandas as pd
 
 # Configuration
 OUTPUT_DIR = os.path.abspath(os.path.join(os.getcwd(), "output"))
 SCRIPTS_DIR = os.path.join(OUTPUT_DIR, "generated_scripts")
 os.makedirs(SCRIPTS_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# Initialize OpenAI client
-API_KEY = os.getenv("OPENAI_API_KEY")
-client = OpenAI(api_key=API_KEY)
+# AutoGen Configuration
+config_list = [
+    {
+        "model": "gpt-4-turbo",
+        "api_key": os.getenv("OPENAI_API_KEY")
+    }
+]
 
+llm_config = {
+    "config_list": config_list,
+    "temperature": 0.3,
+    "timeout": 120
+}
 
-def generate_code(task):
-    """Generate Python code using GPT-4 with validation"""
-    print(f"\n🌀 Generating code for: {task}")
+# Create AutoGen agents
+assistant = AssistantAgent(
+    name="code_assistant",
+    llm_config=llm_config,
+    system_message="You are a Python coding expert. Return ONLY valid Python code without markdown formatting."
+)
 
-    prompt = f"""Create Python code to: {task}
-    Requirements:
-    1. Use Python 3.12 syntax
-    2. Include error handling with try/except
-    3. Add type hints for functions
-    4. Save outputs to {OUTPUT_DIR}
-    5. Return ONLY code block without markdown"""
-
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=8192
-        )
-        return validate_code(response.choices[0].message.content)
-    except Exception as e:
-        raise RuntimeError(f"API Error: {str(e)}")
-
-
-def validate_code(code):
-    """Validate and sanitize generated code"""
-    try:
-        code = re.sub(r'``````', '', code)
-        ast.parse(code)
-        return code
-    except SyntaxError as e:
-        raise ValueError(f"Syntax error: {str(e)}")
-
-
-def install_dependencies(requirements):
-    """Install required packages"""
-    if not requirements:
-        return
-    subprocess.run([sys.executable, "-m", "pip", "install"] + requirements, check=True)
+user_proxy = UserProxyAgent(
+    name="user_proxy",
+    human_input_mode="NEVER",
+    max_consecutive_auto_reply=5,
+    code_execution_config={
+        "work_dir": SCRIPTS_DIR,
+        "use_docker": False
+    }
+)
 
 
 def execute_script(script_path):
@@ -77,10 +62,25 @@ def execute_script(script_path):
 
 
 def process_task(task):
-    """End-to-end task processing"""
+    """End-to-end task processing with AutoGen"""
     try:
-        # Generate and validate code
-        code = generate_code(task)
+        # Initiate AutoGen chat
+        chat_result = user_proxy.initiate_chat(
+            assistant,
+            message=f"Create Python code to: {task}\nRequirements:\n"
+                    "1. Use Python 3.12 syntax\n"
+                    "2. Include error handling\n"
+                    "3. Add type hints\n"
+                    f"4. Save outputs to {OUTPUT_DIR}\n"
+                    "5. Return ONLY code block without markdown"
+        )
+
+        # Extract and sanitize code
+        code = next(m["content"] for m in chat_result.chat_history if m["role"] == "assistant")
+        code = re.sub(r'``````', '', code).strip()
+
+        # Validate syntax
+        ast.parse(code)
 
         # Save script
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -89,9 +89,12 @@ def process_task(task):
             f.write(code)
 
         # Install dependencies
-        requirements = re.findall(r'# REQUIREMENTS: (.*)', code)
+        requirements = []
+        for match in re.finditer(r'# REQUIREMENTS: (.*)', code):
+            requirements.extend([pkg.strip() for pkg in match.group(1).split(',')])
+
         if requirements:
-            install_dependencies([pkg.strip() for pkg in requirements[0].split(',')])
+            subprocess.run([sys.executable, "-m", "pip", "install"] + requirements, check=True)
 
         # Execute script
         result = execute_script(script_path)
@@ -113,11 +116,7 @@ def process_task(task):
         === Error Log ===
         {result['stderr'] or 'No errors'}"""
 
-        return (
-            log_output,
-            script_path,
-            output_files if output_files else None
-        )
+        return log_output, script_path, output_files if output_files else None
 
     except Exception as e:
         error_log = f"""❌ Task Failed
@@ -125,6 +124,7 @@ def process_task(task):
         Error: {str(e)}
         """
         return error_log, None, None
+
 
 
 # Gradio Interface
