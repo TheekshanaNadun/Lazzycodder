@@ -5,18 +5,19 @@ import os
 import re
 import subprocess
 import sys
-import ast
 from datetime import datetime
+from pathlib import Path
+from typing import Tuple, Optional
 
-# Configuration
-OUTPUT_DIR = os.path.abspath(os.path.join(os.getcwd(), "output"))
-SCRIPTS_DIR = os.path.join(OUTPUT_DIR, "generated_scripts")
-os.makedirs(SCRIPTS_DIR, exist_ok=True)
+# Windows configuration
+OUTPUT_DIR = Path(r"L:\Projects\LazyCodder\output")
+SCRIPTS_DIR = OUTPUT_DIR / "generated_scripts"
+SCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# AutoGen Configuration
+# AutoGen configuration
 config_list = [
     {
-        "model": "gpt-4-turbo",
+        "model": "gpt-4o-mini",
         "api_key": os.getenv("OPENAI_API_KEY")
     }
 ]
@@ -27,109 +28,98 @@ llm_config = {
     "timeout": 120
 }
 
-# Create AutoGen agents
+# Enhanced Assistant Agent
 assistant = AssistantAgent(
     name="code_assistant",
     llm_config=llm_config,
-    system_message="You are a Python coding expert. Return ONLY valid Python code without markdown formatting."
+    system_message="""Return ONLY raw Python code with:
+- Python 3.12 syntax with type hints
+- Error handling (try/except)
+- # REQUIREMENTS: packages comment
+- Load data from internet (no local files)
+- Use requests/pandas for data fetching
+- pathlib.WindowsPath for output paths
+- Windows compatibility
+- Generate synthetic data if external source fails
+- NO MARKDOWN/EXPLANATIONS"""
 )
 
+# Execution Proxy with enhanced capabilities
 user_proxy = UserProxyAgent(
-    name="user_proxy",
-    human_input_mode="NEVER",
-    max_consecutive_auto_reply=5,
+    name="execution_agent",
+    human_input_mode="TERMINATE",
+    max_consecutive_auto_reply=3,
     code_execution_config={
-        "work_dir": SCRIPTS_DIR,
-        "use_docker": False
+        "work_dir": str(SCRIPTS_DIR),
+        "use_docker": False,
     }
 )
 
 
-def execute_script(script_path):
-    """Execute generated script with timeout"""
-    result = subprocess.run(
-        [sys.executable, script_path],
-        cwd=OUTPUT_DIR,
-        capture_output=True,
-        text=True,
-        timeout=30
-    )
-    return {
-        "stdout": result.stdout,
-        "stderr": result.stderr,
-        "returncode": result.returncode
-    }
-
-
-def process_task(task):
-    """End-to-end task processing with AutoGen"""
+def process_task(task: str) -> Tuple[str, Optional[str], Optional[list]]:
+    """Process user tasks with Windows-specific handling"""
     try:
-        # Initiate AutoGen chat
         chat_result = user_proxy.initiate_chat(
             assistant,
-            message=f"Create Python code to: {task}\nRequirements:\n"
-                    "1. Use Python 3.12 syntax\n"
-                    "2. Include error handling\n"
-                    "3. Add type hints\n"
-                    f"4. Save outputs to {OUTPUT_DIR}\n"
-                    "5. Return ONLY code block without markdown"
+            message=f"{task}\nOutput directory: {OUTPUT_DIR}",
+            clear_history=True
         )
 
-        # Extract and sanitize code
-        code = next(m["content"] for m in chat_result.chat_history if m["role"] == "assistant")
-        code = re.sub(r'``````', '', code).strip()
+        # Extract generated code
+        code = next(
+            m["content"] for m in reversed(chat_result.chat_history)
+            if m["role"] == "assistant"
+        )
 
-        # Validate syntax
-        ast.parse(code)
+        # Windows path normalization
+        code = code.replace('/', '\\').replace('posix', 'nt')
 
-        # Save script
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        script_path = os.path.join(SCRIPTS_DIR, f"script_{timestamp}.py")
-        with open(script_path, "w") as f:
-            f.write(code)
-
-        # Install dependencies
+        # Install requirements
         requirements = []
         for match in re.finditer(r'# REQUIREMENTS: (.*)', code):
             requirements.extend([pkg.strip() for pkg in match.group(1).split(',')])
 
         if requirements:
-            subprocess.run([sys.executable, "-m", "pip", "install"] + requirements, check=True)
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install"] + requirements,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=True
+            )
 
-        # Execute script
-        result = execute_script(script_path)
+        # Save script
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        script_path = SCRIPTS_DIR / f"script_{timestamp}.py"
+        script_path.write_text(code, encoding="utf-8")
 
-        # Get output files
-        output_files = [os.path.join(OUTPUT_DIR, f)
-                        for f in os.listdir(OUTPUT_DIR)
-                        if f.endswith(('png', 'jpg', 'pdf', 'csv', 'xlsx'))]
+        # Execute in Windows environment
+        result = subprocess.run(
+            [sys.executable, str(script_path)],
+            cwd=str(OUTPUT_DIR),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW
+        )
 
-        # Format log output
-        log_output = f"""✅ Task Completed Successfully
-        ────────────────────────────
-        Script: {os.path.basename(script_path)}
-        Exit Code: {result['returncode']}
+        # Collect outputs
+        output_files = [str(f) for f in OUTPUT_DIR.glob("*.*") if f.is_file()]
 
-        === Console Output ===
-        {result['stdout'] or 'No output'}
+        log_output = f"""✅ Task Completed
+        Exit Code: {result.returncode}
+        Output: {result.stdout or 'No output'}
+        Errors: {result.stderr or 'No errors'}"""
 
-        === Error Log ===
-        {result['stderr'] or 'No errors'}"""
-
-        return log_output, script_path, output_files if output_files else None
+        return log_output, str(script_path), output_files
 
     except Exception as e:
         error_log = f"""❌ Task Failed
-        ────────────────────────────
-        Error: {str(e)}
-        """
+        Error: {str(e)}"""
         return error_log, None, None
-
-
-
-# Gradio Interface
-with gr.Blocks(theme=gr.themes.Soft(), title="Lazy Codder") as ui:
-    ui.css = """
+# Gradio Interface with Custom Styling
+with gr.Blocks(
+        theme=gr.themes.Soft(),
+        title="Lazy Codder",
+        css="""
     .gradio-container {
         background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
     }
@@ -216,7 +206,7 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Lazy Codder") as ui:
         border-bottom: 2px solid #4F46E5;
     }
     """
-
+) as ui:
     with gr.Row(equal_height=True):
         # Input Column
         with gr.Column(scale=4, elem_classes="main-panel"):
@@ -297,21 +287,17 @@ with gr.Blocks(theme=gr.themes.Soft(), title="Lazy Codder") as ui:
             examples_per_page=3
         )
 
-    # Event Handlers
+    # Event handlers
     submit_btn.click(
         fn=process_task,
         inputs=task_input,
         outputs=[log_output, script_output, file_output]
     )
+
     clear_btn.click(
         fn=lambda: [None, None, None],
         outputs=[task_input, log_output, script_output, file_output]
     )
 
 if __name__ == "__main__":
-    print("🚀 Starting GPT-4 Mini Agent...")
-    ui.launch(
-        server_name="0.0.0.0",
-        server_port=7860,
-        show_error=True
-    )
+    ui.launch()
